@@ -768,7 +768,7 @@ def train():
     bnb_model_from_pretrained_args = {}
 
     ## load 4 8 bit 
-    if training_args.bits in [4, 8]:
+    if training_args.bits in [4, 8]:                        # 根据参数类型更新预训练模型参数
         from transformers import BitsAndBytesConfig
         from peft import prepare_model_for_int8_training
         bnb_model_from_pretrained_args.update(dict(
@@ -786,25 +786,25 @@ def train():
             )
         ))
 
-    if model_args.graph_tower is not None:
+    if model_args.graph_tower is not None:                  # 根据graph_tower选择graph model,从而定义graph-llama模型
         model = GraphLlamaForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
+                model_args.model_name_or_path,              # 预训练语言模型 ../vicuna-7b-v1.5-16k
                 cache_dir=training_args.cache_dir,
-                **bnb_model_from_pretrained_args
+                **bnb_model_from_pretrained_args            # model args
             ) ## TODO: add real Graph Llama model 
-    else:
+    else:                                                   # 如果graph_tower是none，说明没有graph mode，只加载语言模型
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             **bnb_model_from_pretrained_args
         )
-    model.config.pretrain_graph_model_path = model.config.pretrain_graph_model_path + model_args.graph_tower
+    model.config.pretrain_graph_model_path = model_args.graph_tower
     model.config.use_cache = False
 
-    if model_args.freeze_backbone:
+    if model_args.freeze_backbone:                          # 是否freeze model
         model.model.requires_grad_(False)
 
-    if training_args.bits in [4, 8]:
+    if training_args.bits in [4, 8]:                        # train的数据类型
         model.config.torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         model = prepare_model_for_int8_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
 
@@ -816,7 +816,7 @@ def train():
                 output.requires_grad_(True)
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-    if training_args.lora_enable:
+    if training_args.lora_enable:                           # 是否使用lora
         from peft import LoraConfig, get_peft_model
         lora_config = LoraConfig(
             r=training_args.lora_r,
@@ -859,7 +859,7 @@ def train():
         tokenizer.pad_token = tokenizer.unk_token
         conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1_1"]
 
-    if model_args.graph_tower is not None:
+    if model_args.graph_tower is not None:              # graph_tower: clip_gt_arxiv
         model_graph_dict = model.get_model().initialize_graph_modules(
             graph_tower=model_args.graph_tower,
             graph_select_layer=model_args.graph_select_layer,
@@ -929,8 +929,8 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
     trainer = GraphChatTrainer(model=model,
-                    tokenizer=tokenizer,
                     args=training_args,
+                    tokenizer=tokenizer,
                     **data_module)
     
     print('************************** parameters: #', sum(p.numel() for p in model.parameters() if p.requires_grad))

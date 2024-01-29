@@ -37,9 +37,6 @@ DEFAULT_GRAPH_PATCH_TOKEN = "<g_patch>"
 DEFAULT_G_START_TOKEN = "<g_start>"
 DEFAULT_G_END_TOKEN = "<g_end>"
 
-
-
-
 class GraphLlamaConfig(LlamaConfig):
     model_type = "GraphLlama"
 
@@ -48,9 +45,13 @@ class GraphPretrainConfig:
         for key, value in dictionary.items():
             setattr(self, key, value)
 
-def load_model_pretrained(model_name, pretrain_model_path): 
+def load_model_pretrained(model_name, pretrain_model_path):
+    """
+    load pretrained CLIP model
+    model_name:                 CLIP
+    pretrain_model_path:        clip_gt_arxiv_pub(pretrained clip model)
+    """
     # load conig json
-    
     assert osp.exists(osp.join(pretrain_model_path, 'config.json')), 'config.json missing'
     with open(osp.join(pretrain_model_path, 'config.json'), 'r') as f:
         config_dict = json.load(f)
@@ -58,39 +59,37 @@ def load_model_pretrained(model_name, pretrain_model_path):
     model = model_name(args)
     pkl_files = glob.glob(osp.join(pretrain_model_path, '*.pkl'))
     state_dict = torch.load(pkl_files[0])
-    # print(state_dict.keys())
     if 'logit_scale' in state_dict.keys(): 
         state_dict.pop('logit_scale')
     print('loading graph pre train model')
-    model.load_state_dict(state_dict)
-
-
+    model.load_state_dict(state_dict)                                       # load pretrainded state
     return model, args
+
+
 def transfer_param_tograph(clip_graph, gnn):
-    
-    print(clip_graph)
+    """
+    transfer the graph model from pretrained clip to single gnn used for graphllama
+    """
     gnn_state_dict = clip_graph.gnn.state_dict()
     gnn.load_state_dict(gnn_state_dict)
     return gnn
 
 
-class GraphLlamaModel(LlamaModel):
+class GraphLlamaModel(LlamaModel):                                  # inherit from LlamaModel
     config_class = GraphLlamaConfig
-
     def __init__(self, config: LlamaConfig):
         super(GraphLlamaModel, self).__init__(config)
 
         if hasattr(config, "graph_tower"):
-            # HACK: for FSDP
-            # self.vision_tower = [CLIPVisionModel.from_pretrained(config.graph_tower)]
-            # self.arxiv_projector = nn.Linear(config.graph_hidden_size, config.hidden_size)
-            if config.graph_tower == 'MPNN': 
+            """
+            Transfer graph model from CLIP to GNN/Graph Transformer
+            """
+            if config.graph_tower == 'MPNN':                        # MPNN
                 self.graph_tower = MPNN(in_channels = config.graph_hidden_size, hidden_channels = config.graph_hidden_size * 2, out_channels = config.graph_hidden_size, dropout = 0.1, num_layers = 2, if_param = False)
-            elif config.graph_tower == "clip_gcn_arxiv": 
-
+            elif config.graph_tower == "clip_gcn_arxiv":            # GNN
                 clip_graph, args= load_model_pretrained(CLIP, config.pretrain_graph_model_path)
-                self.graph_tower = GNN(args)
-                self.graph_tower = transfer_param_tograph(clip_graph, self.graph_tower)
+                self.graph_tower = GNN(args)                                                    # new define single GNN
+                self.graph_tower = transfer_param_tograph(clip_graph, self.graph_tower)         # transfer clip model to single gnn
             elif config.graph_tower == "clip_gt":
                 clip_graph, args= load_model_pretrained(CLIP, config.pretrain_graph_model_path) 
                 self.graph_tower = graph_transformer(args)
@@ -104,29 +103,31 @@ class GraphLlamaModel(LlamaModel):
                 self.graph_tower = graph_transformer(args)
                 self.graph_tower = transfer_param_tograph(clip_graph, self.graph_tower)
 
-            
-
-            # self.vision_tower = CLIPVisionModel.from_pretrained(config.mm_vision_tower)
-
         if hasattr(config, "use_graph_proj"):
+            """
+            Define projector
+            """
             self.graph_projector = nn.Linear(config.graph_hidden_size, config.hidden_size)
 
     def get_graph_tower(self):
+        """
+        Get graph model
+        """
         graph_tower = getattr(self, 'graph_tower', None)
         if type(graph_tower) is list:
             graph_tower = graph_tower[0]
         return graph_tower
 
     def initialize_graph_modules(self, graph_tower, graph_select_layer,
-                                  pretrain_graph_mlp_adapter=None, fsdp=None): # TODO: modify this function
+                                  pretrain_graph_mlp_adapter=None, fsdp=None):
+        """
+        define graph_tower if it was not defined before, which is the graph model in graphllama
+        """
         self.config.graph_tower = graph_tower
-
-
         if not hasattr(self, 'graph_tower'):
             if self.config.graph_tower == 'MPNN': 
                 graph_tower = MPNN(in_channels = self.config.graph_hidden_size, hidden_channels = self.config.graph_hidden_size * 2, out_channels = self.config.graph_hidden_size, dropout = 0.1, num_layers = 2, if_param = False)
             elif self.config.graph_tower == "clip_gcn_arxiv": 
-
                 clip_graph, args= load_model_pretrained(CLIP, self.config.pretrain_graph_model_path)
                 graph_tower = GNN(args)
                 graph_tower = transfer_param_tograph(clip_graph, graph_tower)
@@ -134,7 +135,6 @@ class GraphLlamaModel(LlamaModel):
                 clip_graph, args= load_model_pretrained(CLIP, self.config.pretrain_graph_model_path) 
                 graph_tower = graph_transformer(args)
                 graph_tower = transfer_param_tograph(clip_graph, graph_tower)
-            # graph_tower = MPNN(in_channels = self.config.graph_hidden_size, hidden_channels = self.config.graph_hidden_size * 2, out_channels = self.config.graph_hidden_size, dropout = 0.1, num_layers = 2)
             elif self.config.graph_tower == "clip_gt_arxiv":
                 clip_graph, args= load_model_pretrained(CLIP, self.config.pretrain_graph_model_path) 
                 graph_tower = graph_transformer(args)
@@ -145,22 +145,21 @@ class GraphLlamaModel(LlamaModel):
                 graph_tower = transfer_param_tograph(clip_graph, graph_tower)
         else:
             graph_tower = self.graph_tower
-        graph_tower.requires_grad_(False)
 
-        if fsdp is not None and len(fsdp) > 0:
+        graph_tower.requires_grad_(False)               # freeze graph model
+
+        if fsdp is not None and len(fsdp) > 0:          # ? multi graph model?
             self.graph_tower = [graph_tower]
         else:
             self.graph_tower = graph_tower
 
-        
-
-        self.config.use_graph_proj = True
+        self.config.use_graph_proj = True                                           # need projector
         self.config.graph_select_layer = graph_select_layer
-
-        if not hasattr(self, 'graph_projector'):
+        self.config.graph_hidden_size = self.graph_tower.W_P.out_features           # dim of gnn output
+        if not hasattr(self, 'graph_projector'):                                    # define projector
             self.graph_projector = nn.Linear(self.config.graph_hidden_size, self.config.hidden_size)
 
-        if pretrain_graph_mlp_adapter is not None:
+        if pretrain_graph_mlp_adapter is not None:                                  # load pretrained projector
             graph_projector_weights = torch.load(pretrain_graph_mlp_adapter, map_location='cpu')
             self.graph_projector.load_state_dict({k.split('.')[-1]: v for k, v in graph_projector_weights.items()})
 
@@ -186,19 +185,17 @@ class GraphLlamaModel(LlamaModel):
         #     with torch.no_grad():
         #         self.get_input_embeddings().weight.data[:-2] = orig_embeds_params[:-2].data
 
-        if inputs_embeds is None:
+        if inputs_embeds is None:                                       # embeddings from llama model
             inputs_embeds = self.embed_tokens(input_ids)
 
-        graph_tower = self.get_graph_tower()
+        graph_tower = self.get_graph_tower()                            # get graph model
         if graph_tower is not None and (input_ids.shape[1] != 1 or self.training) and graph_data is not None:
-            # TODO: this is a modified multimodal LLM -- Haotian Liu
-            with torch.no_grad():
+            with torch.no_grad():                                       # traverse graph data, get GNN output
                 if type(graph_data) is list:
                     # variable length images
                     graph_node_features = []
-                    if type(graph_data[0]) is Data:
+                    if type(graph_data[0]) is Data:                     # pyg 中的data类型
                         for g in graph_data:
-                            # print(g)
                             node_forward_out = graph_tower(g)
                             graph_node_features.append(node_forward_out)
                     elif type(graph_data[0]) is dict:
@@ -209,35 +206,40 @@ class GraphLlamaModel(LlamaModel):
                             graph_node_features.append(node_forward_out_2)
                 else:
                     raise ValueError(f'graph_node_reps is expected to be a list but got {type(graph_data)}')
+            
+            # GNN ouput -> Projector
             if type(graph_data) is list:
-                # if type(graph_node_features[0]) is not dict:
                 graph_node_features = [self.graph_projector(node_feature) for node_feature in graph_node_features]
-                # else: 
-                #     graph_node_features = [{'graph_1': self.graph_projector(node_feature['graph_1']), 'graph_2': self.graph_projector(node_feature['graph_2'])} for node_feature in graph_node_features]
             else:
                 raise ValueError(f'graph_node_reps is expected to be a list but got {type(graph_data)}')
+            
+            # ?? fake features of graph
             dummy_graph_features = torch.zeros(256, 128, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             dummy_graph_features = self.graph_projector(dummy_graph_features)
 
             new_input_embeds = []
             cur_graph_idx = 0
+            # traverse every input sequences and its embeddings
             for cur_input_ids, cur_input_embeds in zip(input_ids, inputs_embeds):
+                # judge if it's graph-llm or single llm(no graph patch token)
                 if (cur_input_ids == graph_tower.config.graph_patch_token).sum() == 0:
                     # multimodal LLM, but the current sample is not multimodal
                     cur_input_embeds = cur_input_embeds + (0. * dummy_graph_features).sum()
                     new_input_embeds.append(cur_input_embeds)
                     cur_graph_idx += 1
                     continue
-                if graph_tower.config.use_graph_start_end:
-                    cur_graph_features = graph_node_features[cur_graph_idx]
+                # graph-llm
+                if graph_tower.config.use_graph_start_end:                          # using graph start&end token
+                    cur_graph_features = graph_node_features[cur_graph_idx]         # find node features
                     num_patches = cur_graph_features.shape[0]
+                    # check if the num of start tokens and end tokens are equal
                     if (cur_input_ids == graph_tower.config.graph_start_token).sum() != (cur_input_ids == graph_tower.config.graph_end_token).sum():
                         raise ValueError("The number of graph start tokens and graph end tokens should be the same.")
-                    graph_start_tokens = torch.where(cur_input_ids == graph_tower.config.graph_start_token)[0]
+                    graph_start_tokens = torch.where(cur_input_ids == graph_tower.config.graph_start_token)[0]      # start token idx
                     # print(graph_start_tokens)
                     for graph_start_token_pos in graph_start_tokens:
                         cur_graph_features = graph_node_features[cur_graph_idx].to(device=cur_input_embeds.device)
-                        num_patches = cur_graph_features.shape[0]
+                        num_patches = cur_graph_features.shape[0]                                                   # 
                         if cur_input_ids[graph_start_token_pos + num_patches + 1] != graph_tower.config.graph_end_token:
                             raise ValueError("The graph end token should follow the graph start token.")
                         if orig_embeds_params is not None:
@@ -275,7 +277,7 @@ class GraphLlamaModel(LlamaModel):
         )
 
 
-class GraphLlamaForCausalLM(LlamaForCausalLM):
+class GraphLlamaForCausalLM(LlamaForCausalLM):                                          # 继承生成式因果LLM model
     config_class = GraphLlamaConfig
 
     def __init__(self, config):
@@ -387,6 +389,7 @@ class GraphLlamaForCausalLM(LlamaForCausalLM):
         )
         return model_inputs
 
+    # 得到graph start\end\.. token id
     def initialize_graph_tokenizer(self, use_graph_start_end, tokenizer, device,
                                     tune_graph_mlp_adapter=False, pretrain_graph_mlp_adapter=None):
         vision_config = self.get_graph_tower().config
