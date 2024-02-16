@@ -106,6 +106,8 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_weight_path: str = ""
     lora_bias: str = "none"
     disable_tqdm: bool =False
+    device = torch.device("cuda:7")
+    distributed_state = None
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -741,23 +743,24 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                                 data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
     dataset_cls = (LazySupervisedDataset
-                   if data_args.lazy_preprocess else SupervisedDataset)
+                   if data_args.lazy_preprocess else SupervisedDataset)                                     # lazy_preprocess True
     train_dataset = dataset_cls(tokenizer=tokenizer,
-                                data_path=data_args.data_path,
+                                data_path=data_args.data_path,                                              # './data/stage_1/train_instruct_graphmatch.json'
                                 graph_cfg=dict(
-                                    is_graph=data_args.is_graph,
-                                    sep_graph_conv_front=data_args.sep_graph_conv_front,
-                                    graph_token_len=data_args.graph_token_len,
-                                    graph_content=data_args.graph_content,
-                                    use_graph_start_end=getattr(data_args, 'use_graph_start_end', False)
+                                    is_graph=data_args.is_graph,                                            # True
+                                    sep_graph_conv_front=data_args.sep_graph_conv_front,                    # False
+                                    graph_token_len=data_args.graph_token_len,                              # 0?
+                                    graph_content=data_args.graph_content,                                  # './arxiv_ti_ab.json'
+                                    use_graph_start_end=getattr(data_args, 'use_graph_start_end', False)    # True
                                     ), 
-                                    graph_data_path = data_args.graph_data_path)
+                                    graph_data_path = data_args.graph_data_path)                            # './graph_data/graph_data_all.pt'
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
                 data_collator=data_collator)
 
 def train():
+    # os.environ['LOCAL_RANK'] = "0"
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -791,7 +794,7 @@ def train():
                 model_args.model_name_or_path,              # 预训练语言模型 ../vicuna-7b-v1.5-16k
                 cache_dir=training_args.cache_dir,
                 **bnb_model_from_pretrained_args            # model args
-            ) ## TODO: add real Graph Llama model 
+            )## TODO: add real Graph Llama model 
     else:                                                   # 如果graph_tower是none，说明没有graph mode，只加载语言模型
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
@@ -804,11 +807,11 @@ def train():
     if model_args.freeze_backbone:                          # 是否freeze model
         model.model.requires_grad_(False)
 
-    if training_args.bits in [4, 8]:                        # train的数据类型
+    if training_args.bits in [4, 8]:                        # train的数据类型 16
         model.config.torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         model = prepare_model_for_int8_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
 
-    if training_args.gradient_checkpointing and model_args.graph_tower is None:
+    if training_args.gradient_checkpointing and model_args.graph_tower is None:             # 是否有gnn的pretrain model
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         else:
@@ -816,7 +819,7 @@ def train():
                 output.requires_grad_(True)
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-    if training_args.lora_enable:                           # 是否使用lora
+    if training_args.lora_enable:                           # 是否使用lora-None
         from peft import LoraConfig, get_peft_model
         lora_config = LoraConfig(
             r=training_args.lora_r,
@@ -835,14 +838,14 @@ def train():
         model = get_peft_model(model, lora_config)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right",
+            model_args.model_name_or_path,                          # '../vicuna-7b-v1.5-16k'
+            cache_dir=training_args.cache_dir,                      # None
+            model_max_length=training_args.model_max_length,        # 2048
+            padding_side="right",                                   # right padding
             use_fast=False,
         )
 
-    if model_args.version == "v0":
+    if model_args.version == "v0":                                  # v1
         if tokenizer.pad_token is None:
             smart_tokenizer_and_embedding_resize(
                 special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
@@ -856,17 +859,17 @@ def train():
                 "unk_token": DEFAULT_UNK_TOKEN,
             })
     else:
-        tokenizer.pad_token = tokenizer.unk_token
-        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1_1"]
+        tokenizer.pad_token = tokenizer.unk_token                                                   # <unk> 来padding
+        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1_1"]      # prompt template
 
-    if model_args.graph_tower is not None:              # graph_tower: clip_gt_arxiv
+    if model_args.graph_tower is not None:                                                          # graph_tower: clip_gt_arxiv
         model_graph_dict = model.get_model().initialize_graph_modules(
             graph_tower=model_args.graph_tower,
-            graph_select_layer=model_args.graph_select_layer,
+            graph_select_layer=model_args.graph_select_layer,                                       # -2
             pretrain_graph_mlp_adapter=model_args.pretrain_graph_mlp_adapter,
             fsdp=training_args.fsdp
         )
-        model.get_graph_tower().to(dtype=torch.float16, device=training_args.device)
+        model.get_graph_tower().to(dtype=torch.float16, device=training_args.device)                # graph transformer
         # graph_config = model_graph_dict['graph_config']
 
         # data_args.graph_token_len = model_graph_dict['graph_token_len']
@@ -874,12 +877,12 @@ def train():
         data_args.is_graph = True
 
         model.config.tune_graph_mlp_adapter = training_args.tune_graph_mlp_adapter = model_args.tune_graph_mlp_adapter
-        if model_args.tune_graph_mlp_adapter:
-            model.requires_grad_(False)
+        if model_args.tune_graph_mlp_adapter:                                                       # True
+            model.requires_grad_(False)                                                             # freeze model
             for p in model.get_model().graph_projector.parameters():
-                p.requires_grad = True
+                p.requires_grad = True                                                              # not freeze projector
 
-        model.config.freeze_graph_mlp_adapter = training_args.freeze_graph_mlp_adapter
+        model.config.freeze_graph_mlp_adapter = training_args.freeze_graph_mlp_adapter              # false
         if training_args.freeze_graph_mlp_adapter:
             for p in model.get_model().graph_projector.parameters():
                 p.requires_grad = False
@@ -887,13 +890,13 @@ def train():
         if training_args.bits in [4, 8]:
             model.get_model().graph_projector.to(dtype=compute_dtype, device=training_args.device)
 
-        model.config.use_graph_start_end = data_args.use_graph_start_end = model_args.use_graph_start_end
+        model.config.use_graph_start_end = data_args.use_graph_start_end = model_args.use_graph_start_end           # True
         # graph_config.use_graph_start_end = training_args.use_graph_start_end = model_args.use_graph_start_end
-        training_args.use_graph_start_end = model_args.use_graph_start_end
-        model.config.sep_graph_conv_front = data_args.sep_graph_conv_front
-        model.initialize_graph_tokenizer(use_graph_start_end=model_args.use_graph_start_end, tokenizer=tokenizer, device=training_args.device,
+        training_args.use_graph_start_end = model_args.use_graph_start_end                                          # True
+        model.config.sep_graph_conv_front = data_args.sep_graph_conv_front                                          # False
+        model.initialize_graph_tokenizer(use_graph_start_end=model_args.use_graph_start_end, tokenizer=tokenizer, device=training_args.device,                              # init embeddings&new tokens id
                                           tune_graph_mlp_adapter=model_args.tune_graph_mlp_adapter, pretrain_graph_mlp_adapter=model_args.pretrain_graph_mlp_adapter)
-
+        # fsdp
         params_no_grad = [n for n, p in model.named_parameters() if not p.requires_grad]
         if len(params_no_grad) > 0:
             if training_args.fsdp is not None and len(training_args.fsdp) > 0:
@@ -913,7 +916,7 @@ def train():
 
                 FSDP.__init__ = patch_FSDP_use_orig_params(FSDP.__init__)
 
-    if training_args.bits in [4, 8]:
+    if training_args.bits in [4, 8]:                                                        # 16
         from peft.tuners.lora import LoraLayer
         for name, module in model.named_modules():
             if isinstance(module, LoraLayer):

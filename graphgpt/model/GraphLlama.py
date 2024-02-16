@@ -389,24 +389,24 @@ class GraphLlamaForCausalLM(LlamaForCausalLM):                                  
         )
         return model_inputs
 
-    # 得到graph start\end\.. token id
+    # 得到graph start\end\patch token id
     def initialize_graph_tokenizer(self, use_graph_start_end, tokenizer, device,
                                     tune_graph_mlp_adapter=False, pretrain_graph_mlp_adapter=None):
         vision_config = self.get_graph_tower().config
         vision_config.use_graph_start_end = use_graph_start_end
-        tokenizer.add_tokens([DEFAULT_GRAPH_PATCH_TOKEN], special_tokens=True)
+        tokenizer.add_tokens([DEFAULT_GRAPH_PATCH_TOKEN], special_tokens=True)                                              # <g_patch>
         self.resize_token_embeddings(len(tokenizer))
 
         if use_graph_start_end:
-            num_new_tokens = tokenizer.add_tokens([DEFAULT_G_START_TOKEN, DEFAULT_G_END_TOKEN], special_tokens=True)
+            num_new_tokens = tokenizer.add_tokens([DEFAULT_G_START_TOKEN, DEFAULT_G_END_TOKEN], special_tokens=True)        # <g_start>, <g_end>
             self.resize_token_embeddings(len(tokenizer))
             vision_config.graph_start_token, vision_config.graph_end_token = tokenizer.convert_tokens_to_ids([DEFAULT_G_START_TOKEN, DEFAULT_G_END_TOKEN])
 
             if num_new_tokens > 0:
-                input_embeddings = self.get_input_embeddings().weight.data
+                input_embeddings = self.get_input_embeddings().weight.data                  # [32003, 4096]
                 output_embeddings = self.get_output_embeddings().weight.data
-
-                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
+                # init new token embeddings with avg of origional tokens embedding
+                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(             
                     dim=0, keepdim=True)
                 output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
                     dim=0, keepdim=True)
@@ -414,14 +414,14 @@ class GraphLlamaForCausalLM(LlamaForCausalLM):                                  
                 input_embeddings[-num_new_tokens:] = input_embeddings_avg
                 output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
-            if tune_graph_mlp_adapter:
+            if tune_graph_mlp_adapter:                                                      # True
                 self.get_model().orig_embeds_params = [self.get_input_embeddings().weight.data.clone().to(device=device)]
-                for p in self.get_input_embeddings().parameters():
+                for p in self.get_input_embeddings().parameters():                          # not freeze input embeddings
                     p.requires_grad = True
-                for p in self.get_output_embeddings().parameters():
+                for p in self.get_output_embeddings().parameters():                         # freeze ouput embeddings
                     p.requires_grad = False
 
-            if pretrain_graph_mlp_adapter:
+            if pretrain_graph_mlp_adapter:                                                  # False
                 mm_projector_weights = torch.load(pretrain_graph_mlp_adapter, map_location='cpu')
                 embed_tokens_weight = mm_projector_weights['model.embed_tokens.weight']
                 assert num_new_tokens == 2

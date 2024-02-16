@@ -1,9 +1,11 @@
 import dataclasses
 from enum import auto, Enum
 from typing import List, Tuple
+"""
+Prompt templates
+"""
 
-
-class SeparatorStyle(Enum):
+class SeparatorStyle(Enum):                                 # 枚举类, seperator between messages of different roles
     """Different separator style."""
     SINGLE = auto()
     TWO = auto()
@@ -173,9 +175,9 @@ class Conversation:
 
 conv_v1 = Conversation(
     system="A chat between a curious human and an artificial intelligence assistant. "
-           "The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles=("Human", "Assistant"),
-    messages=(
+           "The assistant gives helpful, detailed, and polite answers to the human's questions.",                       # system message
+    roles=("Human", "Assistant"),                                                                                       # roles
+    messages=(                                                                                                          # history messages
         ("Human", "Give three tips for staying healthy."),
         ("Assistant",
             "Sure, here are three tips for staying healthy:\n"
