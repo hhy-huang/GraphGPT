@@ -1,9 +1,9 @@
 # to fill in the following path to run the first stage of our GraphGPT!
-model_path=
-instruct_ds=
-graph_data_path=
-pretra_gnn=
-output_model=
+model_path=../vicuna-7b-v1.5-16k
+instruct_ds=./data/stage_1/train_instruct_graphmatch.json
+graph_data_path=./graph_data/graph_data_all.pt
+pretra_gnn=clip_gt_arxiv
+output_model=./checkpoints/stage_1
 
 wandb offline
 python -m torch.distributed.run --nnodes=1 --nproc_per_node=4 --master_port=20001 \
